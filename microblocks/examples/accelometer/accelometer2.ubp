@@ -1,0 +1,36 @@
+to '_xrp_scaleAccelRaw' a {
+  comment 'Scale LSM6DSOX accelerometer high-byte data to g (assuming ±2g range).
+Valid raw values are 0..255:
+0-127 = 0..127
+128-255 = -128..-1'
+  if (a >= 128) {
+    a = (a - 256)
+  }
+  comment 'Scale to g (±2g)'
+  a = ((a * 2) / 127)
+  return a
+}
+
+to xrp_readAccelX {
+  comment 'Read accel X (g) from the accelerometer'
+  if (_xrp__imuAddress == 0) {
+    '_xrp_initGyroscope'  comment 'this init also enables accel in your project'
+  }
+  return ('_xrp_scaleAccelRaw' (i2cGet _xrp__imuAddress 41))  comment '0x29'
+}
+
+to xrp_readAccelY {
+  comment 'Read accel Y (g) from the accelerometer'
+  if (_xrp__imuAddress == 0) {
+    '_xrp_initGyroscope'
+  }
+  return ('_xrp_scaleAccelRaw' (i2cGet _xrp__imuAddress 43))  comment '0x2B'
+}
+
+to xrp_readAccelZ {
+  comment 'Read accel Z (g) from the accelerometer'
+  if (_xrp__imuAddress == 0) {
+    '_xrp_initGyroscope'
+  }
+  return ('_xrp_scaleAccelRaw' (i2cGet _xrp__imuAddress 45))  comment '0x2D'
+}

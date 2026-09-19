@@ -1,0 +1,25 @@
+module battitouchfinalLib
+author unknown
+version 1 0 
+description ''
+variables _PinValue _NoTouched pin 
+
+  spec 'r' 'myBlock' 'isPinTouched _' 'auto' '10'
+
+to myBlock pin {
+  _NoTouched = 0
+  repeat 10 {
+    digitalWriteOp pin true
+    waitMillis 1
+    digitalWriteOp pin false
+    _PinValue = (digitalReadOp pin 'up')
+    if (not _PinValue) {
+      _NoTouched = (_NoTouched + 1)
+      if (_NoTouched > 4) {
+        return (booleanConstant true)
+      }
+    }
+  }
+  return (booleanConstant false)
+}
+

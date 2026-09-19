@@ -1,0 +1,848 @@
+module main
+author unknown
+version 1 0 
+description ''
+
+script 222 135 {
+'_xrp_initGyroscope'
+'[sensors:i2cSetPins]' 6 7
+repeat 10 {
+  graphIt (xrp_readRollRate)
+}
+}
+
+script 304 347 {
+'_xrp_initGyroscope'
+}
+
+script 66 378 {
+to '_xrp_initGyroscope' {}
+}
+
+
+module 'Distance (HC-SR04)' Input
+author 'Joan Guillén & Josep Ferràndiz'
+version 1 4 
+tags sensor 'hc-sr04' distance ultrasound 
+description 'Support for the HC-SR04 ultrasound distance sensor.'
+variables _sr04_last 
+
+  spec 'r' 'distance (cm)' 'distance (cm) trigger _ echo _' 'num num' 2 4
+  spec 'r' 'sr04_distanceOnePin' 'distance (cm) pin _' 'num' 0
+
+to 'distance (cm)' trig ech {
+  comment 'Contributed by Joan Guillén and Josep Ferràndiz'
+  digitalWriteOp trig false
+  waitMicros 2
+  digitalWriteOp trig true
+  waitMicros 50
+  digitalWriteOp trig false
+  local 'start' (microsOp)
+  waitUntil (or (not (digitalReadOp ech)) (((microsOp) - start) > 23320))
+  waitUntil (or (digitalReadOp ech) (((microsOp) - start) > 23320))
+  if (((microsOp) - start) > 23320) {
+    comment 'Distance sensor not ready; return the last distance reading'
+    return _sr04_last
+  }
+  comment 'Pulse sent. Measure time until echo is detected.'
+  start = (microsOp)
+  waitUntil (or (not (digitalReadOp ech)) (((microsOp) - start) > 23320))
+  _sr04_last = ((10 * ((microsOp) - start)) / 583)
+  comment 'Leave some time for reverberations to die away.'
+  waitMillis 10
+  return _sr04_last
+}
+
+to sr04_distanceOnePin pin {
+  return ('distance (cm)' pin pin)
+}
+
+
+module 'Encoded DC Motors' Output
+author 'Russell Owen'
+version 0 13 
+depends PID 
+description 'Drive DC motors with encoders'
+variables _edcmotors__initialized _edcmotors__running _edcmotors__numMotors _edcmotors__timeoutMillis _edcmotors__maxSpeed _edcmotors__accel _edcmotors__pinDutyCycle _edcmotors__pinEncoderA _edcmotors__pinEncoderB _edcmotors__pinDirection _edcmotors__targetStartMillis _edcmotors__targetList _edcmotors__pCoeff _edcmotors__iCoeff _edcmotors__dCoeff _edcmotors__deadband _edcmotors__minEffort _edcmotors__maxEffort _edcmotors__maxIntegral 
+
+  spec ' ' 'edcmotors_moveMotorAtSpeed' 'move motor _ at speed _ (encoder counts/sec)' 'num num' 1 500
+  spec ' ' 'edcmotors_moveMotorDistance' 'move motor _ distance _ (encoder counts) at max speed _ (counts/sec)' 'num num num' 1 100 500
+  spec ' ' 'edcmotors_moveMotorWithEffort' 'move motor _ with effort _ (-1023 to 1023)' 'num num' 1 250
+  spec ' ' 'edcmotors_resetMotorEncoders' 'reset motor encoders _ : _ : ...' 'num num num num' 1 2 3 4
+  spec ' ' 'edcmotors_stopAllMotors' 'stop all motors'
+  spec ' ' 'edcmotors_stopMotors' 'stop motors _ : _ : ...' 'num num num num' 1 2 3 4
+  spec ' ' 'edcmotors_waitForMotorsToStop' 'wait for motors to stop _ : _ : ...' 'num num num num' 1 2 3 4
+  space
+  spec 'r' 'edcmotors_isRunning' 'is motor _ running?' 'num' 1
+  space
+  spec ' ' '_edcmotors_basicMoveMotorWithEffort' '_basic move motor _ with effort _ (-1023 to 1023)' 'num num' 1 250
+  spec 'r' '_edcmotors_computePointToPointTargetList' '_compute a target list for a move of distance _ (encoder counts) max speed _ (counts/sec) accel _ (counts/sec^2)' 'num num num' 2000 1000 100
+  spec 'r' '_edcmotors_computeShortPointToPointTargetList' '_compute a target list for a short move of distance _ (encoder counts) accel _ (counts/sec^2)' 'num num' 100 100
+  spec ' ' '_edcmotors_driveMotorsToFollowTarget' '_drive motors to follow target'
+  spec 'r' '_edcmotors_getTargetPositionSpeedDurationState' '_get target position, speed, duration, and state for motor _ at time _ (msec)' 'num num' 1 -1
+  spec 'r' '_edcmotors_addTime' '_add time _ duration _' 'num num' 0 0
+  spec 'r' '_edcmotors_constrainSpeed' '_constrain speed for index _ desired speed _ (encoder counts/sec)' 'num num' 1 500
+  spec ' ' '_edcmotors_initLibrary' '_edcmotors init library'
+  spec ' ' '_edcmotors_initVariables' '_edcmotors init variables'
+  spec ' ' '_edcmotors_moveMotorAlongPathList' '_move motor _ along path list _' 'num auto' 1 'list of [millis, pos, vel, accel] path segments'
+  spec ' ' '_edcmotors_setRunning' '_set running state of motor _ to _' 'num bool' 1 false
+  spec ' ' '_edcmotors_stopOneMotor' '_stop one motor _' 'num' 1
+
+to '_edcmotors_addTime' time duration {
+  comment 'Add a duration to a time'
+  local 'result' (time + duration)
+  if (result < 0) {
+    result += -1073741824
+  }
+  return result
+}
+
+to '_edcmotors_basicMoveMotorWithEffort' index effort {
+  comment 'Implement edcmotors_moveMotorWithEffort. Assumes that _edcmotors_initLibrary has been called'
+  analogWriteOp (at index _edcmotors__pinDutyCycle) (absoluteValue effort)
+  digitalWriteOp (at index _edcmotors__pinDirection) (effort > 0)
+}
+
+to '_edcmotors_computePointToPointTargetList' distance maxSpeed accel {
+  comment 'Compute a path list for a point to point move with a trapezoidal speed profile. Parameters are:
+• distance: how far to move (encoder counts/second, negative to move backwards)
+• maxSpeed: the maximum speed (counts/econd, sign is ignored but value must be nonzero)
+• accel: the acceleration (counts/second/second, sign is ignored but value must be nonzero)
+
+Return a target list for one element of _edcmotors__targetList, or an empty list if there is a problem.
+
+The target list consists of 1-4 path segments
+(see the comment in _edcmotors_moveMotorAlongPathList for the format):
+• Constant acceleration
+• Constant-speed motion at max speed
+• Contant deceleration
+• A short segment of constant position, to make sure the loop sees it and let the motor settle
+Segments may be omitted if the move is short enough that they are not needed.'
+  if (maxSpeed == 0) {
+    sayIt 'maxSpeed=' maxSpeed 'must be nonzero'
+    return ('[data:makeList]')
+  }
+  if (accel == 0) {
+    sayIt 'accel must be nonzero'
+    return ('[data:makeList]')
+  }
+  maxSpeed = (absoluteValue maxSpeed)
+  accel = (absoluteValue accel)
+  local 'distanceAccel' ((maxSpeed * maxSpeed) / (2 * accel))
+  local 'durationMillisAccel' ((maxSpeed * 1000) / accel)
+  local 'distanceAtSpeed' ((absoluteValue distance) - (2 * distanceAccel))
+  local 'durationMillisAtSpeed' ((distanceAtSpeed * 1000) / maxSpeed)
+  if (durationMillisAtSpeed <= 0) {
+    comment 'Move is too short to reach max speed'
+    return ('_edcmotors_computeShortPointToPointTargetList' distance accel)
+  }
+  return ('[data:makeList]' ('[data:makeList]' durationMillisAccel 0 0 (pid_applySign distance accel)) ('[data:makeList]' durationMillisAtSpeed (pid_applySign distance distanceAccel) (pid_applySign distance maxSpeed) 0) ('[data:makeList]' durationMillisAccel (pid_applySign distance (distanceAccel + distanceAtSpeed)) (pid_applySign distance maxSpeed) (0 - (pid_applySign distance accel))))
+}
+
+to '_edcmotors_computeShortPointToPointTargetList' distance accel {
+  comment 'Compute a target list for _edcmotors_computePointToPointTargetList for the case
+that the move is too short to reach maxSpeed. This routine exists solely to get around
+the max length limit for blocks'
+  local 'durationMillisAccel' ('[misc:sqrt]' (((absoluteValue distance) * 1000000) / accel))
+  if (durationMillisAccel <= 0) {
+    comment 'Move is too short to compute segments'
+    return ('[data:makeList]' ('[data:makeList]' -1 distance 0 0))
+  }
+  local 'speed2' (pid_applySign distance ((accel * durationMillisAccel) / 1000))
+  return ('[data:makeList]' ('[data:makeList]' durationMillisAccel 0 0 (pid_applySign distance accel)) ('[data:makeList]' durationMillisAccel (distance / 2) speed2 (0 - (pid_applySign distance accel))))
+}
+
+to '_edcmotors_constrainSpeed' index speed {
+  comment 'Constrain speed (encoder counts/second) for the specified motor to a sane value:
+80% of the unloaded max speed. This should prevent motion that takes far longer than expected.'
+  local 'maxRequestedSpeed' ((800 * (at index _edcmotors__maxSpeed)) / 1000)
+  if ((absoluteValue speed) > maxRequestedSpeed) {
+    speed = (pid_applySign speed maxRequestedSpeed)
+  }
+  return speed
+}
+
+to '_edcmotors_driveMotorsToFollowTarget' {
+  comment 'Drive motors to follow the specified target position and speed.
+This is a background task (infinite loop) that must be running,
+in order for edcmotors_moveMotorAtSpeed and edcmotors_moveMotorDistance to work.'
+  for index _edcmotors__numMotors {
+    pid_resetPID index
+  }
+  '_edcmotors_initLibrary'
+  local 'targetPositionSpeedDurationState' 0
+  local 'positionError' 0
+  local 'correction' 0
+  local 'effort' 0
+  local 'inPath' (booleanConstant false)
+  forever {
+    for index _edcmotors__numMotors {
+      if ((at index _edcmotors__targetStartMillis) >= 0) {
+        targetPositionSpeedDurationState = ('_edcmotors_getTargetPositionSpeedDurationState' index (millisOp))
+        if (and ((at 4 targetPositionSpeedDurationState) > 0) (edcmotors_isRunning index)) {
+          comment 'Either we are still in the path (state=1) or the path has ended (state=2) and we have not yet arrived'
+          comment 'Note: simple subtraction handles encoder wraparound automatically'
+          positionError = ((at 1 targetPositionSpeedDurationState) - ('[encoder:count]' index))
+          correction = (pid_computePID index positionError (at index _edcmotors__pCoeff) (at index _edcmotors__iCoeff) (at index _edcmotors__dCoeff) (at index _edcmotors__maxIntegral))
+          comment 'Compute predicted ("feed forward") effort.'
+          effort = (((at 2 targetPositionSpeedDurationState) * (at index _edcmotors__maxEffort)) / (at index _edcmotors__maxSpeed))
+          comment 'If the predicted effort is too small to be useful, set it to 0,
+  in order to make the system more stable at the start and end of each move.'
+          if ((absoluteValue effort) < (at index _edcmotors__maxEffort)) {
+            effort = 0
+          }
+          effort += (correction / 1000)
+          effort = (pid_constrainValue effort (at index _edcmotors__deadband) (at index _edcmotors__minEffort) (at index _edcmotors__maxEffort))
+          comment 'Check that following is still wanted, just before commanding the motor.'
+          if ((at index _edcmotors__targetStartMillis) >= 0) {
+            '_edcmotors_basicMoveMotorWithEffort' index effort
+            if (and ((at 4 targetPositionSpeedDurationState) == 2) (effort == 0)) {
+              comment 'We have arrived'
+              '_edcmotors_setRunning' index (booleanConstant false)
+            } (and ((at 4 targetPositionSpeedDurationState) == 2) ((at 3 targetPositionSpeedDurationState) > _edcmotors__timeoutMillis)) {
+              comment 'Move timed out'
+              '_edcmotors_setRunning' index (booleanConstant false)
+            } else {
+              '_edcmotors_setRunning' index (booleanConstant true)
+            }
+          }
+        } else {
+          '_edcmotors_basicMoveMotorWithEffort' index 0
+        }
+      }
+    }
+  }
+}
+
+to '_edcmotors_getTargetPositionSpeedDurationState' index atMillis {
+  comment 'Compute target position, speed, state for the specified motor at the specified time (msec).
+Return a list with four elements:
+* target position (encoder counts)
+* target speed (encoder counts/second)
+* duration of this segment (millis)
+* state, an enum with values: 1=no path, 2=in path, 3=at end of path, holding final position
+Assumes that _edcmotors_initLibrary has been called.'
+  local 'durationMillis' 0
+  local 'targetList' (at index _edcmotors__targetList)
+  local 'targetDurationPositionSpeedAccel' 0
+  local 'position' 0
+  local 'speed' 0
+  forever {
+    comment 'Check list length and start time every time through the loop since another task may have changed while the loop starts over.'
+    if (or ((size targetList) == 0) (at index _edcmotors__targetStartMillis)) {
+      comment 'No path'
+      '_edcmotors_setRunning' index (booleanConstant false)
+      return ('[data:makeList]' 0 0 0 0)
+    }
+    durationMillis = (millisSince (at index _edcmotors__targetStartMillis) atMillis)
+    targetDurationPositionSpeedAccel = (at 1 targetList)
+    if (durationMillis <= (at 1 targetDurationPositionSpeedAccel)) {
+      comment 'Use this segment'
+      position = (((at 2 targetDurationPositionSpeedAccel) + (((at 3 targetDurationPositionSpeedAccel) * durationMillis) / 1000)) + (((((at 4 targetDurationPositionSpeedAccel) * durationMillis) / 1000) * durationMillis) / 2000))
+      speed = ((at 3 targetDurationPositionSpeedAccel) + (((at 4 targetDurationPositionSpeedAccel) * durationMillis) / 1000))
+      return ('[data:makeList]' position speed durationMillis 1)
+    } ((size targetList) > 1) {
+      comment 'This segment has expired and we have another; discard it and try the next (if any)'
+      local 'oldStartTime' (at index _edcmotors__targetStartMillis)
+      local 'duration' (at 1 targetDurationPositionSpeedAccel)
+      atPut index _edcmotors__targetStartMillis ('_edcmotors_addTime' (at index _edcmotors__targetStartMillis) (at 1 targetDurationPositionSpeedAccel))
+      '[data:delete]' 1 targetList
+    } else {
+      comment 'We have finished the final segment; assume we hold the final position'
+      local 'endDurationMillis' (at 1 targetDurationPositionSpeedAccel)
+      position = (((at 2 targetDurationPositionSpeedAccel) + (((at 3 targetDurationPositionSpeedAccel) * endDurationMillis) / 1000)) + (((((at 4 targetDurationPositionSpeedAccel) * endDurationMillis) / 1000) * endDurationMillis) / 2000))
+      return ('[data:makeList]' position 0 (durationMillis - endDurationMillis) 2)
+    }
+  }
+}
+
+to '_edcmotors_initLibrary' {
+  comment 'Initialize the DC Motors library.
+Check motor power and initialize variables (if not already initialized).
+Defaults to an XRP robot kit with 2 motors; change this code for other systems'
+  if (not _edcmotors__initialized) {
+    _edcmotors__numMotors = (edcmotors_getNumMotors)
+    _edcmotors__timeoutMillis = 1000
+    if (_edcmotors__numMotors == 0) {
+      sayIt 'Error: edcmotors_getNumMotors is not defined, or is defined but returned 0'
+      return
+    }
+    '_edcmotors_initVariables'
+    '_edcmotors_initSystemVariables'
+    for motor (edcmotors_getNumMotors) {
+      '[encoder:start]' motor (at motor _edcmotors__pinEncoderA) (at motor _edcmotors__pinEncoderB)
+    }
+    _edcmotors__initialized = (booleanConstant true)
+  }
+  '_edcmotors_checkSystem'
+  sendBroadcast '_edcmotors_driveMotorsToFollowTarget'
+}
+
+to '_edcmotors_initVariables' {
+  comment 'Initialize variables whose values do not depend on the type of system,
+and create all lists (but do not set values) of variables that are system-specific.'
+  _edcmotors__running = 0
+  _edcmotors__targetStartMillis = (newList _edcmotors__numMotors -1)
+  comment 'A list of target segments of constant acceleration,
+each of the form: [durationMillis startPosition startSpeed acceleration].
+A negative duration indicates that this segment should run forever (until a new move or stop).
+This is used to hold the final position of point to point moves,
+and to specify the speed for constant-speed moves.'
+  _edcmotors__targetList = (newList _edcmotors__numMotors ('[data:makeList]'))
+  comment 'The following lists are system specific, so their elements must be set elsewhere.'
+  _edcmotors__pCoeff = (newList _edcmotors__numMotors 0)
+  _edcmotors__iCoeff = (newList _edcmotors__numMotors 0)
+  _edcmotors__dCoeff = (newList _edcmotors__numMotors 0)
+  _edcmotors__deadband = (newList _edcmotors__numMotors 0)
+  _edcmotors__minEffort = (newList _edcmotors__numMotors 0)
+  _edcmotors__maxEffort = (newList _edcmotors__numMotors 0)
+  _edcmotors__maxIntegral = (newList _edcmotors__numMotors 0)
+  _edcmotors__maxSpeed = (newList _edcmotors__numMotors 0)
+  _edcmotors__accel = (newList _edcmotors__numMotors 0)
+  _edcmotors__pinEncoderA = (newList _edcmotors__numMotors 0)
+  _edcmotors__pinEncoderB = (newList _edcmotors__numMotors 0)
+  _edcmotors__pinDirection = (newList _edcmotors__numMotors 0)
+  _edcmotors__pinDutyCycle = (newList _edcmotors__numMotors 0)
+}
+
+to '_edcmotors_moveMotorAlongPathList' index pathList {
+  comment 'Move the specified motor along the specified path list.
+Path list is a list of path segments of constant acceleration, each of the form:
+[durationMillis startPosition startSpeed acceleration].
+Note that if acceleration is 0, the segment has constant speed,
+and if acceleration and startSpeed are both 0, the segment has constant position.'
+  '_edcmotors_initLibrary'
+  if (not (isType pathList 'list')) {
+    sayIt 'pathList=' pathList 'must be a list'
+    return
+  }
+  atPut index _edcmotors__targetStartMillis -1
+  edcmotors_resetMotorEncoders index
+  atPut index _edcmotors__targetList pathList
+  '_edcmotors_setRunning' index (booleanConstant true)
+  atPut index _edcmotors__targetStartMillis (millisOp)
+}
+
+to '_edcmotors_setRunning' index running {
+  comment 'Set the running state of the specified motor. Assumes initialization'
+  if running {
+    _edcmotors__running = (_edcmotors__running | (1 << (index - 1)))
+  } else {
+    _edcmotors__running = (_edcmotors__running & ('~' (1 << (index - 1))))
+  }
+}
+
+to '_edcmotors_stopOneMotor' index {
+  '_edcmotors_initLibrary'
+  atPut index _edcmotors__targetStartMillis -1
+  atPut index _edcmotors__targetList ('[data:makeList]')
+  analogWriteOp (at index _edcmotors__pinDutyCycle) 0
+  '_edcmotors_setRunning' index (booleanConstant false)
+}
+
+to edcmotors_isRunning index {
+  comment 'Return true if the specified motor is running.'
+  return ('[data:convertType]' (_edcmotors__running & (1 << (index - 1))) 'boolean')
+}
+
+to edcmotors_moveMotorAtSpeed index speed {
+  comment 'Move the specified motor at the specified speed (counts/sec)'
+  '_edcmotors_initLibrary'
+  speed = ('_edcmotors_constrainSpeed' index speed)
+  '_edcmotors_moveMotorAlongPathList' index ('[data:makeList]' ('[data:makeList]' 86400000 0 speed 0))
+}
+
+to edcmotors_moveMotorDistance index distance maxSpeed {
+  comment 'Move the specified motor the specified distance (encoder counts) at the specified maximum speed (counts/sec).
+Specify distance < 0 for a negative move. The sign of maxSpeed is ignored, but the value must be nonzero.'
+  '_edcmotors_initLibrary'
+  maxSpeed = ('_edcmotors_constrainSpeed' index maxSpeed)
+  if (maxSpeed == 0) {
+    sayIt 'maxSpeed=' maxSpeed 'must be non-zero'
+    return
+  }
+  local 'accel' (at index _edcmotors__accel)
+  if (accel == 0) {
+    sayIt 'accel is 0; set variable _edcmotors__accel'
+    return
+  }
+  '_edcmotors_moveMotorAlongPathList' index ('_edcmotors_computePointToPointTargetList' distance maxSpeed accel)
+}
+
+to edcmotors_moveMotorWithEffort index effort {
+  comment 'Move the specified motor at the specified "effort", a value between -1023 and 1023.
+Effort is the duty cycle of the drive signal to the motor (plus a sign signal),
+and is roughly proportional to speed, at least if the motor has no load.
+Warning:  geared motors have enough friction that they may not reliably move at low speeds.
+For example the XRP wheels may not reliably move if the absolute value of effort is less than about 200.
+Thus the usable range of effort is usually rather small.'
+  '_edcmotors_initLibrary'
+  comment 'Prevent _edcmotors_driveMotorsToFollowTarget from moving the motor'
+  atPut index _edcmotors__targetStartMillis -1
+  '_edcmotors_setRunning' index (booleanConstant true)
+  '_edcmotors_basicMoveMotorWithEffort' index effort
+}
+
+to edcmotors_resetMotorEncoders {
+  '_edcmotors_initLibrary'
+  for index (pushArgCount) {
+    '[encoder:reset]' (getArg index)
+  }
+}
+
+to edcmotors_stopAllMotors {
+  for index _edcmotors__numMotors {
+    '_edcmotors_stopOneMotor' index
+  }
+}
+
+to edcmotors_stopMotors {
+  comment 'Stop the specified motors'
+  for index (pushArgCount) {
+    '_edcmotors_stopOneMotor' (getArg index)
+  }
+}
+
+to edcmotors_waitForMotorsToStop {
+  comment 'Wait for the specified motors to stop moving.'
+  local 'mask' 0
+  for index (pushArgCount) {
+    mask = (mask | (1 << ((getArg index) - 1)))
+  }
+  comment 'Constrain the mask to actual existing motors.'
+  mask = (mask & ((1 << _edcmotors__numMotors) - 1))
+  waitUntil ((mask & _edcmotors__running) == 0)
+}
+
+
+module PID Operators
+author 'Russell Owen'
+version 0 9 
+description 'PID Control Loop'
+variables _pid__initialized _pid__numPIDs _pid__prevError _pid__prevMicros _pid__prevIntegral 
+
+  spec 'r' 'pid_computePID' 'compute pid at index _ error _ p coeff _ i coeff _ d coeff _ max integral _ (ignored if 0)' 'num num num num num num' 1 0 1 0 0 0
+  spec ' ' 'pid_resetPID' 'reset pid at index _' 'num' 1
+  space
+  spec 'r' 'pid_constrainValue' 'constrain value _ deadband _ minimum _ maximum _' 'num num num num' 0 0 0 1000
+  spec 'r' 'pid_applySign' 'apply sign of _ to value _' 'num num' 1 0
+  space
+  spec ' ' '_pid_extendPIDLists' '_extend pid lists; index _' 'num' 1
+  spec ' ' '_pid_initLibrary' '_init pid library'
+
+to '_pid_extendPIDLists' index {
+  comment 'Extend global list variables, if needed,
+so that they are large enough to use the specified index.'
+  '_pid_initLibrary'
+  repeatUntil ((size _pid__prevError) >= index) {
+    '[data:addLast]' 0 _pid__prevError
+    '[data:addLast]' -1 _pid__prevMicros
+    '[data:addLast]' 0 _pid__prevIntegral
+  }
+  comment 'Set _pid__numPIDs so pid_computePID can efficiently decide if the list needs to be extended'
+  _pid__numPIDs = (size _pid__prevError)
+}
+
+to '_pid_initLibrary' {
+  comment 'Create global lists.'
+  if (not _pid__initialized) {
+    _pid__prevError = (newList 0)
+    _pid__prevMicros = (newList 0)
+    _pid__prevIntegral = (newList 0)
+    _pid__initialized = (booleanConstant true)
+  }
+}
+
+to pid_applySign sign value {
+  comment 'If sign < 0 return -value else return value'
+  return (ifExpression (sign >= 0) value (0 - value))
+}
+
+to pid_computePID index error pCoeff iCoeff dCoeff maxIntegral {
+  comment 'Compute the next PID value value, using inputs:
+* index: index of the PID loop
+* error: error to correct
+* pCoeff: proportional coefficient (corr/error)
+* iCoeff: integral coefficient (corr-msec/error)
+* dCoeff: derivitive coefficient (corr/error-msec)
+* maxIntegral: maximum absolute value of the integrated error; ignored if 0'
+  if (_pid__numPIDs < index) {
+    '_pid_extendPIDLists' index
+  }
+  local 'pValue' 0
+  local 'iValue' 0
+  local 'dValue' 0
+  local 'integral' 0
+  local 'currMicros' (microsOp)
+  local 'prevMicros' (at index _pid__prevMicros)
+  pValue = (pCoeff * error)
+  if (prevMicros >= 0) {
+    comment 'We have old data for this PID loop, so compute derivitive and integral contributions.'
+    local 'deltaMicros' (microsSince prevMicros currMicros)
+    local 'deltaErrorr' (error - (at index _pid__prevError))
+    dValue = (((dCoeff * deltaErrorr) * 1000) / deltaMicros)
+    integral = (((error * deltaMicros) / 1000) + (at index _pid__prevIntegral))
+    if (and (maxIntegral > 0) ((absoluteValue integral) > maxIntegral)) {
+      integral = (pid_applySign integral maxIntegral)
+    }
+    iValue = (iCoeff * integral)
+  }
+  atPut index _pid__prevMicros currMicros
+  atPut index _pid__prevError error
+  atPut index _pid__prevIntegral integral
+  return (pValue + (iValue + dValue))
+}
+
+to pid_constrainValue value deadband minimum maximum {
+  comment 'Constrain a value as follows:
+If |value| < deadband: return 0.
+If |value| < minimum: return minimum with sign of value.
+If |value| > maximum: return maximum with sign of value.'
+  local 'absValue' (absoluteValue value)
+  if (absValue < deadband) {
+    return 0
+  } (absValue < minimum) {
+    return (pid_applySign value minimum)
+  } (absValue > maximum) {
+    return (pid_applySign value maximum)
+  } else {
+    return value
+  }
+}
+
+to pid_resetPID index {
+  comment 'Zero the recorded error data for a specific PID loop.
+Call this before starting each move, to avoid unwanted values
+from the integral and derivitive terms.'
+  if (_pid__numPIDs < index) {
+    '_pid_extendPIDLists' index
+  }
+  atPut index _pid__prevError 0
+  atPut index _pid__prevMicros -1
+  atPut index _pid__prevIntegral 0
+}
+
+
+module 'Sensor Primitives' Input
+author MicroBlocks
+version 1 1 
+tags tilt acceleration light sensor capacitive button 
+description 'Provides blocks to read tilt in the three axes, acceleration, temperature and light level. Many boards come with this particular set of sensors, such as the micro:bit, the Circuit Playground Express, the Calliope or the Citilab ED1.'
+
+  spec 'r' '[sensors:tiltX]' 'tilt x'
+  spec 'r' '[sensors:tiltY]' 'tilt y'
+  spec 'r' '[sensors:tiltZ]' 'tilt z'
+  spec 'r' '[display:lightLevel]' 'light level'
+  spec 'r' '[sensors:temperature]' 'temperature (°C)'
+  space
+  spec 'r' '[sensors:touchRead]' 'capacitive sensor _' 'num' 1
+  space
+  spec ' ' '[sensors:i2cSetClockSpeed]' 'set i2c clock speed _' 'num' 400000
+  spec ' ' '[sensors:i2cSetPins]' 'set i2c pins SDA _ SCL _' 'num num' 4 5
+
+module Servo Output
+author MicroBlocks
+version 1 3 
+tags servo motor angle rotation position 
+description 'Control both positional (angle) and rotational servo motors.
+'
+variables _servoPin _servoPulseWidth 
+
+  spec ' ' 'setServoAngle' 'set servo _ to _ degrees (-90 to 90)' 'num num' 1 90
+  spec ' ' 'setServoSpeed' 'set servo _ to speed _ (-100 to 100)' 'num num' 1 100
+  spec ' ' 'stopServo' 'stop servo _' 'num' 1
+  spec 'r' '_servoIndex' '_servoIndex _' 'num' 1
+  spec ' ' '_servoPulse' '_servoPulse pin _ usecs _' 'num num' 1 1500
+  spec ' ' '_servoUpdateLoop' '_servoUpdateLoop'
+
+to '_servoIndex' which {
+  if (_servoPin == 0) {
+    _servoPin = ('[data:makeList]')
+    _servoPulseWidth = ('[data:makeList]')
+    sendBroadcast '_servoUpdateLoop'
+  }
+  local 'i' ('[data:find]' which _servoPin)
+  if (i < 0) {
+    comment 'Add new pin'
+    '[data:addLast]' which _servoPin
+    '[data:addLast]' '1500' _servoPulseWidth
+    i = (size _servoPin)
+  }
+  return i
+}
+
+to '_servoPulse' pin usecs {
+  if (usecs == 0) {
+    comment 'Servo stopped; do nothing'
+    return 0
+  }
+  usecs = (maximum 850 (minimum usecs 2150))
+  comment 'Split wait into a long wait followed by a wait of <= 30 usecs for greater accuracy'
+  local 'endTime' ((microsOp) + usecs)
+  digitalWriteOp pin true
+  waitMicros (usecs - 30)
+  waitMicros (endTime - (microsOp))
+  digitalWriteOp pin false
+}
+
+to '_servoUpdateLoop' {
+  forever {
+    if (_servoPin != 0) {
+      comment 'If the _servoPin list is not 0, update the servos'
+      for i (size _servoPin) {
+        local 'pin' (at i _servoPin)
+        local 'usecs' (at i _servoPulseWidth)
+        if (and (pin >= 0) (usecs != 0)) {
+          '_servoPulse' pin usecs
+        }
+      }
+      waitMillis 15
+    }
+  }
+}
+
+to setServoAngle which degrees optionalReverse {
+  local 'reversed' false
+  if ((pushArgCount) > 2) {
+    reversed = optionalReverse
+  }
+  if reversed {
+    degrees = (0 - degrees)
+  }
+  local 'pulseWidth' (1500 - (10 * degrees))
+  if ('[io:hasServo]') {
+    '[io:setServo]' which pulseWidth
+  } else {
+    atPut ('_servoIndex' which) _servoPulseWidth pulseWidth
+  }
+}
+
+to setServoSpeed which speed optionalReverse {
+  local 'reversed' false
+  if ((pushArgCount) > 2) {
+    reversed = optionalReverse
+  }
+  if reversed {
+    speed = (0 - speed)
+  }
+  local 'pulseWidth' (1500 - (10 * speed))
+  if ((absoluteValue speed) < 2) {
+    pulseWidth = 0
+  }
+  if ('[io:hasServo]') {
+    '[io:setServo]' which pulseWidth
+  } else {
+    atPut ('_servoIndex' which) _servoPulseWidth pulseWidth
+  }
+}
+
+to stopServo which {
+  if ('[io:hasServo]') {
+    '[io:setServo]' which 0
+  } else {
+    atPut ('_servoIndex' which) _servoPulseWidth 0
+  }
+}
+
+
+module XRP Output
+author 'Russell Owen'
+version 0 12 
+depends 'Encoded DC Motors' Servo 'Distance (HC-SR04)' 
+description 'Drive the WPI XRP robot'
+variables _xrp__imuAddress 
+
+  spec ' ' 'xrp_driveAtSpeed' 'drive at speed left _ right _ (mm/sec)' 'num num' 300 300
+  spec ' ' 'xrp_driveDistance' 'drive distance _ (mm) speed _ (mm/sec)' 'num num' 100 300
+  spec ' ' 'xrp_stopWheels' 'stop both wheels'
+  spec ' ' 'xrp_turnAngle' 'turn angle _ (deg) at motor speed _ (mm/sec)' 'num num' 90 300
+  spec ' ' 'xrp_waitForWheelsToStop' 'wait for wheels to stop'
+  space
+  spec ' ' 'xrp_setServo' 'set servo _ to angle _ (deg)' 'num num' 1 0
+  space
+  spec 'r' 'xrp_readRollRate' 'read roll rate (deg/sec)'
+  spec 'r' 'xrp_readPitchRate' 'read pitch rate (deg/sec)'
+  spec 'r' 'xrp_readYawRate' 'read yaw rate (deg/sec)'
+  spec 'r' 'xrp_readDistanceSensor' 'read distance sensor (cm)'
+  spec 'r' 'xrp_readLineSensors' 'read left, right line sensors'
+  space
+  spec 'r' 'edcmotors_getNumMotors' 'get the number of encoded DC motors'
+  space
+  spec ' ' '_edcmotors_checkSystem' '_edcmotors_checkSystem'
+  spec ' ' '_edcmotors_initSystemVariables' '_edcmotors_initSystemVariables'
+  spec ' ' '_xrp_initGyroscope' '_init gyroscope'
+  spec 'r' '_xrp_mmToCounts' '_convert _ mm to encoder counts' 'num' 0
+  spec 'r' '_xrp_scaleRollPitchOrYaw' '_scale gyro raw roll, pitch, or yaw _' 'num' 10
+
+to '_edcmotors_checkSystem' {
+  comment 'Check drive power to the XRP board.'
+  local 'clearText' (booleanConstant false)
+  repeatUntil ((analogReadOp 28) >= 300) {
+    sayIt 'Insufficient drive voltage; check the power switch and batteries.'
+    clearText = (booleanConstant true)
+  }
+  if clearText {
+    sayIt ''
+  }
+}
+
+to '_edcmotors_initSystemVariables' {
+  comment 'Set system-specific motors variables.
+Assume that _init_edcmotors_variables has been called, so that all lists exist.'
+  if (or (_edcmotors__numMotors < 2) (_edcmotors__numMotors > 4)) {
+    sayIt 'Number of motors must be 2-4'
+    return
+  }
+  comment 'If you are controlling more than the standard 2 wheel motors,
+you may want to tweak the following lines to specify different tuning parameters for the extra motors,
+especially if the extra motors are not the same as the wheel motors.'
+  atPut 'all' _edcmotors__pCoeff 5000
+  atPut 'all' _edcmotors__iCoeff 0
+  atPut 'all' _edcmotors__dCoeff 0
+  atPut 'all' _edcmotors__deadband 5
+  atPut 'all' _edcmotors__minEffort 300
+  atPut 'all' _edcmotors__maxEffort 1023
+  atPut 'all' _edcmotors__maxIntegral 10
+  comment 'Approximate maximum motor speed (encoder counts/second) with no load.'
+  atPut 'all' _edcmotors__maxSpeed 1800
+  comment 'Acceleration for point to point moves (encoder counts/second^2)'
+  atPut 'all' _edcmotors__accel 1250
+  atPut 1 _edcmotors__pinEncoderA 4
+  atPut 1 _edcmotors__pinEncoderB 5
+  atPut 1 _edcmotors__pinDirection 6
+  atPut 1 _edcmotors__pinDutyCycle 7
+  atPut 2 _edcmotors__pinEncoderA 12
+  atPut 2 _edcmotors__pinEncoderB 13
+  atPut 2 _edcmotors__pinDirection 14
+  atPut 2 _edcmotors__pinDutyCycle 15
+  if (_edcmotors__numMotors > 2) {
+    atPut 3 _edcmotors__pinEncoderA 0
+    atPut 3 _edcmotors__pinEncoderB 1
+    atPut 3 _edcmotors__pinDirection 2
+    atPut 3 _edcmotors__pinDutyCycle 3
+  }
+  if (_edcmotors__numMotors > 3) {
+    atPut 4 _edcmotors__pinEncoderA 8
+    atPut 4 _edcmotors__pinEncoderB 9
+    atPut 4 _edcmotors__pinDirection 10
+    atPut 4 _edcmotors__pinDutyCycle 11
+  }
+}
+
+to '_xrp_initGyroscope' {
+  comment 'Initialize the gyroscope'
+  _xrp__imuAddress = (hexToInt '6A')
+  comment 'Configure the LSM6DSOX IMU gyroscope:
+* Read at 1660 Hz (a fairly high rate)
+* Maximum roll, pitch, or yaw is 250 deg/sec (the 2nd-most-sensitive range)
+See section 9.16 of https://www.st.com/resource/en/datasheet/lsm6dsox.pdf for details.'
+  i2cSet _xrp__imuAddress (hexToInt '11') (hexToInt '80')
+}
+
+to '_xrp_mmToCounts' mm {
+  comment 'Convert mm to encoder counts.
+Use a hard-coded constant to avoid having to check initialization.'
+  return ((mm * 1000) / 644)
+}
+
+to '_xrp_scaleRollPitchOrYaw' speed {
+  comment 'Scale LSM6DSOX gyroscope speed data from raw to degrees/second.
+Valid raw speed values are between 0 and 255, inclusive,
+with the following unusual subranges:
+* 0-127 represents positive values 0 through 127,
+* 128-255 represents negative values -128 through -1.'
+  comment 'Handle negative values.'
+  if (speed >= 128) {
+    speed = (speed - 256)
+  }
+  comment 'Scale the result to degrees/second'
+  speed = ((speed * 250) / 127)
+  return speed
+}
+
+to edcmotors_getNumMotors {
+  comment 'Get the number of motors. The standard XRP kit comes with 2 motors that drive wheels,
+but the board can drive up to 4 motors. If you are using more than 2 motors,
+override this method to return how many you are using. Never return less than 2.'
+  return 2
+}
+
+to xrp_driveAtSpeed leftSpeed rightSpeed {
+  comment 'Drive the wheels at the specified speed (mm/sec)'
+  edcmotors_moveMotorAtSpeed 1 ('_xrp_mmToCounts' leftSpeed)
+  edcmotors_moveMotorAtSpeed 2 (0 - ('_xrp_mmToCounts' rightSpeed))
+}
+
+to xrp_driveDistance distance speed {
+  comment 'Drive the wheels the specified distance (mm) at the specified speed (mm/second)'
+  local 'distanceCounts' ('_xrp_mmToCounts' distance)
+  local 'speedCounts' ('_xrp_mmToCounts' speed)
+  edcmotors_moveMotorDistance 1 distanceCounts speedCounts
+  edcmotors_moveMotorDistance 2 (0 - distanceCounts) speedCounts
+}
+
+to xrp_readDistanceSensor {
+  comment 'Return the distance (cm) read by the HC-SR04 distance sensor.'
+  return ('distance (cm)' 20 21)
+}
+
+to xrp_readLineSensors {
+  return ('[data:makeList]' (analogReadOp 26) (analogReadOp 27))
+}
+
+to xrp_readPitchRate {
+  comment 'Read pitch (deg/sec) from the gyroscope'
+  if (_xrp__imuAddress == 0) {
+    '_xrp_initGyroscope'
+  }
+  return ('_xrp_scaleRollPitchOrYaw' (i2cGet _xrp__imuAddress 35))
+}
+
+to xrp_readRollRate {
+  comment 'Read roll (deg/sec) from the gyroscope'
+  if (_xrp__imuAddress == 0) {
+    '_xrp_initGyroscope'
+  }
+  return ('_xrp_scaleRollPitchOrYaw' (i2cGet _xrp__imuAddress 37))
+}
+
+to xrp_readYawRate {
+  comment 'Read yaw (deg/sec) from the gyroscope'
+  if (_xrp__imuAddress == 0) {
+    '_xrp_initGyroscope'
+  }
+  return (0 - ('_xrp_scaleRollPitchOrYaw' (i2cGet _xrp__imuAddress 39)))
+}
+
+to xrp_setServo index angle {
+  '_edcmotors_checkSystem'
+  if (index == 1) {
+    setServoAngle 16 angle
+  } (index == 2) {
+    setServoAngle 17 angle
+  } else {
+    sayIt 'Invalid servo index; must be 1 or 2'
+  }
+}
+
+to xrp_stopWheels {
+  comment 'Stop both wheels'
+  edcmotors_stopMotors 1 2
+}
+
+to xrp_turnAngle angle speed {
+  comment 'Turn the robot by the specified angle (degrees),
+moving the wheel at the specified speed (mm/second).
+Rotate about a point halfway between the wheels.'
+  local 'speedCounts' (pid_applySign angle ('_xrp_mmToCounts' speed))
+  local 'distanceCounts' ((20989 * angle) / 10000)
+  edcmotors_moveMotorDistance 1 distanceCounts speedCounts
+  edcmotors_moveMotorDistance 2 distanceCounts speedCounts
+}
+
+to xrp_waitForWheelsToStop {
+  comment 'Wait for both wheels to stop. This is based on predicted end time,
+rather than actual motion, so it is not exact.'
+  edcmotors_waitForMotorsToStop 1 2
+}
+

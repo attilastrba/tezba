@@ -1,0 +1,66 @@
+module main
+author unknown
+version 1 0 
+description ''
+variables _PinValue _NoTouched pin 
+
+  spec 'r' 'myBlock' 'isPinTouched _' 'auto' '10'
+
+to myBlock pin {
+  _NoTouched = 0
+  repeat 10 {
+    digitalWriteOp pin true
+    waitMillis 1
+    digitalWriteOp pin false
+    _PinValue = (digitalReadOp pin 'up')
+    if (not _PinValue) {
+      _NoTouched = (_NoTouched + 1)
+      if (_NoTouched > 4) {
+        return (booleanConstant true)
+      }
+    }
+  }
+  return (booleanConstant false)
+}
+
+script 104 66 (touchPin_pinTouched 16)
+
+script 660 110 (v pin)
+
+script 762 128 {
+_PinValue = (touchPin_pinTouched 16)
+}
+
+script 778 278 (3 >= threshold)
+
+script 772 330 (v n)
+
+script 346 1074 {
+forever {
+  graphIt (myBlock 16)
+}
+}
+
+script 66 1258 {
+to myBlock {}
+}
+
+
+module TouchPin Input
+author MicroBlocks
+version 1 0 
+description 'Reads the capacitive sensor from RaspberryPI Pico based on this implementation https://diyelectromusic.com/2023/06/12/raspberry-pi-pico-capacitive-touch/
+'
+variables _touchPin_isTouched _touchPin_releaseCount 
+
+  spec 'r' 'touchPin_logoTouched' 'logo touched'
+
+to touchPin_logoTouched {
+  if ('micro:bit v2' == (boardType)) {
+    return (touchPin_pinTouched 26)
+  } ('Calliope v3' == (boardType)) {
+    return (touchPin_pinTouched 26)
+  }
+  return (booleanConstant false)
+}
+

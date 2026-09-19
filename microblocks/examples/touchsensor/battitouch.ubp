@@ -1,0 +1,157 @@
+module main
+author unknown
+version 1 0 
+description ''
+variables test touch pin 
+
+  spec ' ' 'CapacitivPin' 'CapacitivPin _' 'auto' '10'
+  spec 'r' 'myBlock' 'isPinTouched _' 'auto' '10'
+
+to CapacitivPin pin {
+  touch = 0
+  repeat 10 {
+    digitalWriteOp pin true
+    waitMillis 1
+    digitalWriteOp 16 false
+    test = (digitalReadOp pin 'up')
+    graphIt test touch
+    if (not test) {
+      touch = (touch + 1)
+      if (touch > 4) {
+        return (booleanConstant true)
+      }
+    }
+  }
+  return (booleanConstant false)
+}
+
+to myBlock pin {
+  touch = 0
+  repeat 10 {
+    digitalWriteOp pin true
+    waitMillis 1
+    digitalWriteOp 16 false
+    test = (digitalReadOp pin 'up')
+    graphIt test touch
+    if (not test) {
+      touch = (touch + 1)
+      if (touch > 4) {
+        return (booleanConstant true)
+      }
+    }
+  }
+  return (booleanConstant false)
+}
+
+script 87 50 (touchPin_pinTouched 16)
+
+script 644 94 (v pin)
+
+script 745 112 {
+test = (touchPin_pinTouched 16)
+}
+
+script 761 262 (3 >= threshold)
+
+script 755 313 (v n)
+
+script 50 342 {
+local 'n' 0
+comment 'Wait for pin to become high, incrementing n'
+}
+
+script 871 367 ((10 - 2) + 1)
+
+script 593 391 ('[data:convertType]' 123 'number')
+
+script 764 436 {
+comment 'Long charging time means pin is touched'
+graphIt test touch
+}
+
+script 424 489 {
+repeatUntil false nil
+}
+
+script 79 505 {
+to touchPin_pinTouched {}
+}
+
+script 574 521 (3 == 0)
+
+script 597 535 {
+touch = (touch - 1)
+}
+
+script 350 640 {
+CapacitivPin 16
+}
+
+script 176 643 {
+CapacitivPin 10
+}
+
+script 428 676 {
+CapacitivPin 10
+}
+
+script 77 682 {
+to CapacitivPin {}
+}
+
+script 363 693 {
+CapacitivPin 10
+}
+
+script 528 729 {
+n += 1
+}
+
+script 765 808 {
+digitalWriteOp pin false
+if (_touchPin_isTouched == 9) {
+  _touchPin_isTouched = (booleanConstant false)
+}
+comment 'count is < threshold so pin not touched'
+if _touchPin_isTouched {
+  comment 'Require several low counts in a row
+to exit "isTouched" state to avoid jitter.'
+  _touchPin_releaseCount += 1
+  if (_touchPin_releaseCount > 3) {
+    _touchPin_isTouched = (booleanConstant false)
+  }
+}
+return _touchPin_isTouched
+}
+
+script 345 1191 (myBlock 16)
+
+script 50 1242 {
+to myBlock {}
+}
+
+
+module TouchPin Input
+author MicroBlocks
+version 1 0 
+description 'Capacitive pin touch sensing for micro:bit, Calliope mini, and other boards with touch pins. Works with pins that have 1M ohm external pullup resistors.
+'
+variables _touchPin_isTouched _touchPin_releaseCount 
+
+  spec 'r' 'touchPin_pinTouched' 'pin _ touched' 'num' 0
+  spec 'r' 'touchPin_logoTouched' 'logo touched'
+
+to touchPin_logoTouched {
+  if ('micro:bit v2' == (boardType)) {
+    return (touchPin_pinTouched 26)
+  } ('Calliope v3' == (boardType)) {
+    return (touchPin_pinTouched 26)
+  }
+  return (booleanConstant false)
+}
+
+to touchPin_pinTouched pin {
+  local 'threshold' 20
+  comment 'Discharge pin'
+}
+
